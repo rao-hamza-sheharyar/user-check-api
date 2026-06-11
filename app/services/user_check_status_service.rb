@@ -14,41 +14,53 @@ class UserCheckStatusService
 
     return BANNED if user.persisted? && user.banned?
 
-    ban_status = run_checks
-
+    new_user = user.new_record?
     old_status = user.ban_status
-    user.ban_status = ban_status
+    vpn_result = { vpn: nil, proxy: nil, tor: nil }
+
+    new_status = run_checks(vpn_result)
+
+    user.ban_status = new_status
     user.save!
 
-    create_integrity_log_if_needed(user, old_status)
+    create_log_if_needed(new_user, old_status, new_status, vpn_result)
 
-    ban_status
+    new_status
   end
 
   private
 
-  def run_checks
+  def run_checks(vpn_result)
     return BANNED unless country_whitelisted?
     return BANNED if @rooted_device == true
+
+    result = VpnApiService.new(ip: @ip).call
+    vpn_result.merge!(result)
+
+    return BANNED if result[:vpn] == true
+    return BANNED if result[:proxy] == true
+    return BANNED if result[:tor] == true
 
     NOT_BANNED
   end
 
   def country_whitelisted?
+    return false if @country.blank?
+
     $redis.sismember("country_whitelist", @country)
   end
 
-  def create_integrity_log_if_needed(user, old_status)
-    return if user.persisted? && old_status == user.ban_status
+  def create_log_if_needed(new_user, old_status, new_status, vpn_result)
+    return unless new_user || old_status != new_status
 
-    IntegrityLog.create!(
+    IntegrityLoggerService.new(
       idfa: @idfa,
-      ban_status: user.ban_status,
+      ban_status: new_status,
       ip: @ip,
       rooted_device: @rooted_device,
       country: @country,
-      proxy: nil,
-      vpn: nil
-    )
+      proxy: vpn_result[:proxy],
+      vpn: vpn_result[:vpn]
+    ).call
   end
 end
